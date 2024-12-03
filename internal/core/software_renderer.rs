@@ -503,8 +503,15 @@ impl SoftwareRenderer {
                     logical_size,
                 );
                 let rotation = RotationInfo { orientation: rotation, screen_size: size };
-                let mut i = renderer.dirty_region.iter().map(|r| {
-                    (r.cast() * factor).to_rect().round_out().cast().transformed(rotation)
+                let screen_rect = PhysicalRect::from_size(size);
+                let mut i = renderer.dirty_region.iter().filter_map(|r| {
+                    (r.cast() * factor)
+                        .to_rect()
+                        .round_out()
+                        .cast()
+                        .intersection(&screen_rect)?
+                        .transformed(rotation)
+                        .into()
                 });
                 let dirty_region = PhysicalRegion {
                     rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),
@@ -973,10 +980,16 @@ fn prepare_scene(
         );
         let rotation =
             RotationInfo { orientation: software_renderer.rotation.get(), screen_size: size };
-        let mut i = renderer
-            .dirty_region
-            .iter()
-            .map(|r| (r.cast() * factor).to_rect().round_out().cast().transformed(rotation));
+        let screen_rect = PhysicalRect::from_size(size);
+        let mut i = renderer.dirty_region.iter().filter_map(|r| {
+            (r.cast() * factor)
+                .to_rect()
+                .round_out()
+                .cast()
+                .intersection(&screen_rect)?
+                .transformed(rotation)
+                .into()
+        });
         dirty_region = PhysicalRegion {
             rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),
             count: renderer.dirty_region.iter().count(),
@@ -1447,10 +1460,12 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                             continue;
                         };
 
+                        let gl_x = PhysicalLength::new((-glyph.x).truncate() as i16);
+                        let gl_y = PhysicalLength::new(glyph.y.truncate() as i16);
                         let target_rect = PhysicalRect::new(
                             PhysicalPoint::from_lengths(
-                                line_x + positioned_glyph.x + glyph.x,
-                                baseline_y - glyph.y - glyph.height,
+                                line_x + positioned_glyph.x - gl_x,
+                                baseline_y - gl_y - glyph.height,
                             ),
                             glyph.size(),
                         )
@@ -1502,10 +1517,21 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                         },
                                     }
                                 } else {
-                                    let off_x =
-                                        Fixed::<i32, 8>::from_fixed(scale_delta) * off_x as i32;
-                                    let off_y =
-                                        Fixed::<i32, 8>::from_fixed(scale_delta) * off_y as i32;
+                                    let delta32 = Fixed::<i32, 8>::from_fixed(scale_delta);
+                                    let normalize = |x: Fixed<i32, 8>| {
+                                        if x < Fixed::from_integer(0) {
+                                            x + Fixed::from_integer(1)
+                                        } else {
+                                            x
+                                        }
+                                    };
+                                    let fract_x = normalize(
+                                        (-glyph.x) - Fixed::from_integer(gl_x.get() as _),
+                                    );
+                                    let off_x = delta32 * off_x as i32 + fract_x;
+                                    let fract_y =
+                                        normalize(glyph.y - Fixed::from_integer(gl_y.get() as _));
+                                    let off_y = delta32 * off_y as i32 + fract_y;
                                     SceneTexture {
                                         data,
                                         pixel_stride,

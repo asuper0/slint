@@ -1,8 +1,6 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: MIT
 
-import { h } from "@astrojs/starlight/expressive-code/hast";
-
 export async function getEnumContent(enumName: string | undefined) {
     if (enumName) {
         try {
@@ -18,27 +16,26 @@ export async function getEnumContent(enumName: string | undefined) {
     return "";
 }
 
-const KnownStructs = ["Point"];
 export async function getStructContent(
-    typeName: KnownType | undefined,
+    structName: string | undefined,
 ): Promise<string> {
-    if (typeName === undefined) {
+    if (structName === undefined) {
         return "";
     }
-    if (KnownStructs.includes(typeName)) {
-        if (typeName) {
-            try {
-                const module = await import(
-                    `../content/collections/structs/${typeName}.md`
-                );
-                return module.compiledContent();
-            } catch (error) {
-                console.error(
-                    `Failed to load enum file for ${typeName}:`,
-                    error,
-                );
-                return "";
-            }
+    const baseStruct = structName.replace(/[\[\]]/g, "");
+
+    if (baseStruct) {
+        try {
+            const module = await import(
+                `../content/collections/structs/${baseStruct}.md`
+            );
+            return module.compiledContent();
+        } catch (error) {
+            console.error(
+                `Failed to load struct file for ${baseStruct}:`,
+                error,
+            );
+            return "";
         }
     }
     return "";
@@ -71,35 +68,36 @@ export interface TypeInfo {
 }
 
 export function getTypeInfo(typeName: KnownType): TypeInfo {
-    switch (typeName) {
+    const baseType = typeName.replace(/[\[\]]/g, "") as KnownType;
+    switch (baseType) {
         case "angle":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0deg",
             };
         case "bool":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "false",
             };
         case "brush":
             return {
-                href: "/master/docs/slint/guide/language/types/#colors-and-brushes",
+                href: linkMap.ColorsRef.href,
                 defaultValue: "a transparent brush",
             };
         case "color":
             return {
-                href: "/master/docs/slint/guide/language/types/#colors-and-brushes",
+                href: linkMap.ColorsRef.href,
                 defaultValue: "a transparent color",
             };
         case "duration":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0ms",
             };
         case "easing":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "linear",
             };
         case "enum":
@@ -109,52 +107,52 @@ export function getTypeInfo(typeName: KnownType): TypeInfo {
             };
         case "float":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0.0",
             };
         case "image":
             return {
-                href: "/master/docs/slint/guide/language/types/#images",
+                href: linkMap.ImageType.href,
                 defaultValue: "the empty image",
             };
         case "int":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0",
             };
         case "length":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0px",
             };
         case "percent":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0%",
             };
         case "physical-length":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0phx",
             };
         case "Point":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "(0px, 0px)",
             };
         case "relative-font-size":
             return {
-                href: "/master/docs/slint/guide/language/types/",
+                href: linkMap.Types.href,
                 defaultValue: "0rem",
             };
         case "string":
             return {
-                href: "/master/docs/slint/guide/language/types/#string",
+                href: linkMap.StringType.href,
                 defaultValue: '""',
             };
         case "struct":
             return {
-                href: "/master/docs/slint/guide/language/types/#structs",
+                href: linkMap.StructType.href,
                 defaultValue: "a struct with all default values",
             };
         default: {
@@ -190,74 +188,11 @@ export function removeLeadingSpaces(input: string, spaces: number = 4): string {
     return modifiedLines.join("\n");
 }
 
-export const linkMap = {
-    AnimationRef: {
-        href: "/reference/builtins/animations",
-    },
-    BorderRadiusRectangle: {
-        href: "/reference/elements/rectangle#border-radius-properties",
-    },
-    ColorsRef: {
-        href: "/reference/builtins/colors",
-    },
-    CommonProperties: {
-        href: "/reference/overview",
-    },
-    DebugFn: {
-        href: "/reference/builtins/builtinfunctions#debug",
-    },
-    FocusHandling: {
-        href: "/guide/focus",
-    },
-    GridLayout: {
-        href: "/reference/layouts/gridlayout",
-    },
-    HorizontalBox: {
-        href: "/reference/std-widgets/horizontalbox",
-    },
-    HorizontalLayout: {
-        href: "/reference/layouts/horizontallayout",
-    },
-    Image: {
-        href: "/reference/elements/image",
-    },
-    ListView: {
-        href: "/reference/std-widgets/listview",
-    },
-    LineEdit: {
-        href: "/reference/std-widgets/lineedit",
-    },
-    Path: {
-        href: "/reference/elements/path",
-    },
-    ProgressIndicator: {
-        href: "/reference/std-widgets/progressindicator",
-    },
-    Rectangle: {
-        href: "/reference/elements/rectangle",
-    },
-    ScrollView: {
-        href: "/reference/std-widgets/scrollview",
-    },
-    StandardButton: {
-        href: "/reference/std-widgets/standardbutton",
-    },
-    StyleWidgets: {
-        href: "/reference/std-widgets/style",
-    },
-    Text: {
-        href: "/reference/elements/text/",
-    },
-    TextInput: {
-        href: "/reference/elements/textinput/",
-    },
-    Timer: {
-        href: "/reference/elements/timer/",
-    },
-    VerticalBox: {
-        href: "/reference/std-widgets/verticalbox",
-    },
-    VerticalLayout: {
-        href: "/reference/layouts/verticallayout",
-    },
-} as const;
+type LinkMapType = {
+    [K: string]: {
+        href: string;
+    };
+};
+
+import linkMapData from "./link-data.json" assert { type: "json" };
+export const linkMap: Readonly<LinkMapType> = linkMapData;

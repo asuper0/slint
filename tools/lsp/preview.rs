@@ -56,7 +56,13 @@ enum PreviewFutureState {
     NeedsReload,
 }
 
-type SourceCodeCache = HashMap<Url, (SourceFileVersion, String)>;
+#[derive(Clone, Debug)]
+struct SourceCodeCacheEntry {
+    // None when read from disk!
+    version: SourceFileVersion,
+    code: String,
+}
+type SourceCodeCache = HashMap<Url, SourceCodeCacheEntry>;
 
 #[derive(Default)]
 struct ContentCache {
@@ -67,7 +73,6 @@ struct ContentCache {
     current_previewed_component: Option<PreviewComponent>,
     current_load_behavior: Option<LoadBehavior>,
     loading_state: PreviewFutureState,
-    highlight: Option<(Url, TextSize)>,
     ui_is_visible: bool,
 }
 
@@ -128,31 +133,45 @@ pub fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
     }
 }
 
+// Just mark the cache as "read from disk" by setting the version to None.
+// Do not reset the code: We can check once the LSP has re-read it from disk
+// whether we need to refresh the preview or not.
 fn invalidate_contents(url: &lsp_types::Url) {
-    let component = {
+    let mut cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
+
+    if let Some(cache_entry) = cache.source_code.get_mut(url) {
+        cache_entry.version = None;
+    }
+}
+
+fn delete_document(url: &lsp_types::Url) {
+    let (current, url_is_used, ui_is_visible) = {
         let mut cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-
         cache.source_code.remove(url);
-
-        ((cache.dependencies.contains(url) || cache.resources.contains(url)) && cache.ui_is_visible)
-            .then_some(cache.current_component())
-            .flatten()
+        (
+            cache.current_previewed_component.clone(),
+            cache.dependencies.contains(url),
+            cache.ui_is_visible,
+        )
     };
 
-    // No need to bother with the document_cache: It follows the preview state at all times!
-    if let Some(component) = component {
-        load_preview(component, LoadBehavior::Reload);
+    if let Some(current) = current {
+        if (&current.url == url || url_is_used) && ui_is_visible {
+            // Trigger a compile error now!
+            load_preview(current, LoadBehavior::Reload);
+        }
     }
 }
 
 fn set_contents(url: &common::VersionedUrl, content: String) {
     let mut cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-    let old = cache.source_code.insert(url.url().clone(), (*url.version(), content.clone()));
+    let old = cache.source_code.insert(
+        url.url().clone(),
+        SourceCodeCacheEntry { version: *url.version(), code: content.clone() },
+    );
 
-    if let Some((old_version, old)) = old {
-        if content == old && old_version == *url.version() {
-            return;
-        }
+    if Some(content) == old.map(|o| o.code) {
+        return;
     }
 
     if cache.dependencies.contains(url.url()) {
@@ -252,7 +271,7 @@ fn add_new_component() {
             drop_data.path,
             drop_data.selection_offset,
             None,
-            true,
+            SelectionNotification::AfterUpdate,
         );
 
         {
@@ -668,7 +687,7 @@ fn drop_component(component_index: i32, x: f32, y: f32) {
             drop_data.path,
             drop_data.selection_offset,
             None,
-            true,
+            SelectionNotification::AfterUpdate,
         );
 
         send_workspace_edit(format!("Add element {}", component_name), edit, false);
@@ -698,7 +717,7 @@ fn delete_selected_element() {
     };
 
     let cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-    let Some((version, _)) = cache.source_code.get(&url).cloned() else {
+    let Some(cache_entry) = cache.source_code.get(&url) else {
         return;
     };
 
@@ -711,8 +730,11 @@ fn delete_selected_element() {
     // Insert a placeholder node into layouts if those end up empty:
     let new_text = placeholder_node_text(&selected_node);
 
-    let edit =
-        common::create_workspace_edit(url, version, vec![lsp_types::TextEdit { range, new_text }]);
+    let edit = common::create_workspace_edit(
+        url,
+        cache_entry.version,
+        vec![lsp_types::TextEdit { range, new_text }],
+    );
 
     send_workspace_edit("Delete element".to_string(), edit, true);
 }
@@ -857,7 +879,7 @@ fn move_selected_element(x: f32, y: f32, mouse_x: f32, mouse_y: f32) {
             drop_data.path,
             drop_data.selection_offset,
             None,
-            true,
+            SelectionNotification::AfterUpdate,
         );
 
         send_workspace_edit("Move element".to_string(), edit, false);
@@ -964,10 +986,15 @@ fn finish_parsing(preview_url: &Url, ok: bool) {
     if let Some(document_cache) = document_cache() {
         let mut document_cache = document_cache.snapshot().unwrap();
 
-        for (url, (version, contents)) in &source_code {
+        for (url, cache_entry) in &source_code {
             let mut diag = diagnostics::BuildDiagnostics::default();
             if document_cache.get_document(url).is_none() {
-                poll_once(document_cache.load_url(url, *version, contents.clone(), &mut diag));
+                poll_once(document_cache.load_url(
+                    url,
+                    cache_entry.version,
+                    cache_entry.code.clone(),
+                    &mut diag,
+                ));
             }
         }
 
@@ -1053,17 +1080,23 @@ fn config_changed(config: PreviewConfig) {
 }
 
 /// If the file is in the cache, returns it.
+///
+/// If the file is not known, the return an empty string marked as "from disk". This is fine:
+/// The LSP side will load the file and inform us about it soon.
+///
 /// In any way, register it as a dependency
-fn get_url_from_cache(url: &Url) -> Option<(SourceFileVersion, String)> {
+fn get_url_from_cache(url: &Url) -> (SourceFileVersion, String) {
     let mut cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-    let r = cache.source_code.get(url).cloned();
     cache.dependencies.insert(url.to_owned());
-    r
+
+    cache.source_code.get(url).map(|r| (r.version, r.code.clone())).unwrap_or_default().clone()
 }
 
-fn get_path_from_cache(path: &Path) -> Option<(SourceFileVersion, String)> {
-    let url = Url::from_file_path(path).ok()?;
-    get_url_from_cache(&url)
+fn get_path_from_cache(path: &Path) -> std::io::Result<(SourceFileVersion, String)> {
+    let url = Url::from_file_path(path).map_err(|()| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to convert path to URL")
+    })?;
+    Ok(get_url_from_cache(&url))
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1153,7 +1186,7 @@ async fn reload_timer_function() {
             se.path.clone(),
             se.offset,
             None,
-            false,
+            SelectionNotification::Never,
         );
 
         if notify_editor {
@@ -1300,13 +1333,7 @@ async fn reload_preview_impl(
     start_parsing();
 
     let path = component.url.to_file_path().unwrap_or(PathBuf::from(&component.url.to_string()));
-    let (version, source) = get_url_from_cache(&component.url).unwrap_or_else(|| {
-        if cfg!(not(target_arch = "wasm32")) {
-            (None, std::fs::read_to_string(&path).unwrap_or_default())
-        } else {
-            (None, String::new())
-        }
-    });
+    let (version, source) = get_url_from_cache(&component.url);
 
     let (diagnostics, compiled, open_import_fallback, source_file_versions) = parse_source(
         config.include_paths,
@@ -1320,7 +1347,9 @@ async fn reload_preview_impl(
             let path = path.to_owned();
             Box::pin(async move {
                 let path = PathBuf::from(&path);
-                get_path_from_cache(&path).map(Result::Ok)
+                // Always return Some to stop the compiler from trying to load itself...
+                // All loading is done by the LSP for us!
+                Some(get_path_from_cache(&path))
             })
         },
     )
@@ -1364,14 +1393,6 @@ fn set_preview_factory(
     let factory = slint::ComponentFactory::new(move |ctx: FactoryContext| {
         let instance = compiled.create_embedded(ctx).unwrap();
 
-        if let Some((url, offset)) =
-            CONTENT_CACHE.get().and_then(|c| c.lock().unwrap().highlight.clone())
-        {
-            highlight(Some(url), offset);
-        } else {
-            highlight(None, 0.into());
-        }
-
         callback(instance.clone_strong());
 
         Some(instance)
@@ -1385,27 +1406,31 @@ fn set_preview_factory(
 /// Highlight the element pointed at the offset in the path.
 /// When path is None, remove the highlight.
 pub fn highlight(url: Option<Url>, offset: TextSize) {
-    let highlight = url.clone().map(|u| (u, offset));
-    let mut cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-
-    if cache.highlight == highlight {
+    let Some(path) = url.as_ref().and_then(|u| Url::to_file_path(&u).ok()) else {
         return;
-    }
-    cache.highlight = highlight;
+    };
 
     let selected = selected_element();
 
-    if cache.highlight.as_ref().map_or(true, |(url, _)| cache.dependencies.contains(url)) {
-        let _ = run_in_ui_thread(move || async move {
-            let Some(path) = url.and_then(|u| Url::to_file_path(&u).ok()) else {
-                return;
-            };
+    if let Some(selected) = &selected {
+        if selected.path == path && selected.offset == offset {
+            return;
+        }
+    }
 
+    let cache = CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
+    if url.as_ref().map_or(true, |url| cache.dependencies.contains(url)) {
+        let _ = run_in_ui_thread(move || async move {
             if Some((path.clone(), offset)) == selected.map(|s| (s.path, s.offset)) {
                 // Already selected!
                 return;
             }
-            element_selection::select_element_at_source_code_position(path, offset, None, false);
+            element_selection::select_element_at_source_code_position(
+                path,
+                offset,
+                None,
+                SelectionNotification::Never,
+            );
         });
     }
 }
@@ -1446,7 +1471,7 @@ fn convert_diagnostics(
                 continue;
             }
             let uri = path_to_url(d.source_file().unwrap());
-            let new_version = cache.source_code.get(&uri).and_then(|(v, _)| *v);
+            let new_version = cache.source_code.get(&uri).and_then(|e| e.version);
             if let Some(data) = result.get_mut(&uri) {
                 if data.0.is_some() && new_version.is_some() && data.0 != new_version {
                     continue;
@@ -1522,10 +1547,17 @@ fn set_drop_mark(mark: &Option<drop_location::DropMark>) {
     })
 }
 
+#[derive(Debug, PartialEq)]
+pub enum SelectionNotification {
+    Never,
+    Now,
+    AfterUpdate,
+}
+
 fn set_selected_element(
     selection: Option<element_selection::ElementSelection>,
     positions: &[i_slint_core::lengths::LogicalRect],
-    notify_editor_about_selection_after_update: bool,
+    editor_notification: SelectionNotification,
 ) {
     let (layout_kind, parent_layout_kind, type_name) = {
         let selection_node = selection.as_ref().and_then(|s| s.as_element_node());
@@ -1547,6 +1579,9 @@ fn set_selected_element(
 
     set_drop_mark(&None);
 
+    let element_node = selection.as_ref().and_then(|s| s.as_element_node());
+    let notify_editor_about_selection_after_update =
+        editor_notification == SelectionNotification::AfterUpdate;
     PREVIEW_STATE.with(move |preview_state| {
         let mut preview_state = preview_state.borrow_mut();
 
@@ -1627,7 +1662,24 @@ fn set_selected_element(
         preview_state.selected = selection;
         preview_state.notify_editor_about_selection_after_update =
             notify_editor_about_selection_after_update;
-    })
+    });
+
+    if editor_notification == SelectionNotification::Now {
+        if let Some(element_node) = element_node {
+            let (path, pos) = element_node.with_element_node(|node| {
+                let sf = &node.source_file;
+                (
+                    sf.path().to_owned(),
+                    util::text_size_to_lsp_position(sf, node.text_range().start()),
+                )
+            });
+            ask_editor_to_show_document(
+                &path.to_string_lossy(),
+                lsp_types::Range::new(pos, pos),
+                false,
+            );
+        }
+    }
 }
 
 fn selected_element() -> Option<ElementSelection> {
@@ -1781,6 +1833,7 @@ pub fn lsp_to_preview_message(message: crate::common::LspToPreviewMessage) {
     use crate::common::LspToPreviewMessage as M;
     match message {
         M::InvalidateContents { url } => invalidate_contents(&url),
+        M::FileLost { url } => delete_document(&url),
         M::SetContents { url, contents } => {
             set_contents(&url, contents);
         }
